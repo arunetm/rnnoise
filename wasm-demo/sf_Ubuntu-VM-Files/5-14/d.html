@@ -1,0 +1,52 @@
+<!doctype html>
+
+<html>
+
+  <head>
+    <meta charset="utf-8">
+    <title>WASM memory test</title>
+  </head>
+
+  <body>
+    <script>
+      var importObject = {
+        imports: { imported_func: arg => console.log(arg) }
+      };
+      // prepare imports
+      function ___handle_stack_overflow() {
+      abort('stack overflow')
+      }
+      function _emscripten_get_sbrk_ptr() {
+      return 99344;
+      }
+      function _emscripten_memcpy_big(dest, src, num) {
+      HEAPU8.copyWithin(dest, src, src + num);
+    }
+
+  
+  function _emscripten_get_heap_size() {
+      return HEAPU8.length;
+    }
+    function abortOnCannotGrowMemory(requestedSize) {
+      abort('Cannot enlarge memory arrays to size ' + requestedSize + ' bytes (OOM). Either (1) compile with  -s INITIAL_MEMORY=X  with X higher than the current value ' + HEAP8.length + ', (2) compile with  -s ALLOW_MEMORY_GROWTH=1  which allows increasing the size at runtime, or (3) if you want malloc to return NULL (0) instead of this abort, compile with  -s ABORTING_MALLOC=0 ');
+    }function _emscripten_resize_heap(requestedSize) {
+      requestedSize = requestedSize >>> 0;
+      abortOnCannotGrowMemory(requestedSize);
+    }
+
+    var wasmMemory;
+
+      var asmLibraryArg = { "__handle_stack_overflow": ___handle_stack_overflow, "emscripten_get_sbrk_ptr": _emscripten_get_sbrk_ptr, "emscripten_memcpy_big": _emscripten_memcpy_big, "emscripten_resize_heap": _emscripten_resize_heap,  "memory": wasmMemory, "setTempRet0": _setTempRet0, "table": wasmTable };
+      var info = {
+      'env': asmLibraryArg,
+      'wasi_snapshot_preview1': asmLibraryArg
+      };
+
+      fetch('rnnoise_demo_simple.wasm').
+      then(response => response.arrayBuffer()).
+      then(bytes => WebAssembly.instantiate(bytes, info)).
+      then(console.log(obj.instance.exports));
+    </script>
+  </body>
+
+</html>
