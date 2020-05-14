@@ -1,0 +1,1 @@
+/home/arun/emsdk/upstream/emscripten/emcc -g -O2 -s  @CMakeFiles/rnnoise_demo_simple.dir/objects1.rsp  -o ../bin/rnnoise_demo_simple.html @CMakeFiles/rnnoise_demo_simple.dir/linklibs.rsp

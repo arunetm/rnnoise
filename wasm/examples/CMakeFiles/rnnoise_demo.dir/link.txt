@@ -1,0 +1,1 @@
+/home/arun/emsdk/upstream/emscripten/emcc -DNDEBUG -O2 -s  -O2 @CMakeFiles/rnnoise_demo.dir/objects1.rsp  -o ../bin/rnnoise_demo.js @CMakeFiles/rnnoise_demo.dir/linklibs.rsp

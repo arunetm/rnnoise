@@ -102,7 +102,7 @@ void compute_dense(const DenseLayer *layer, float *output, const float *input) {
         }
 
     } else {
-        *(int *) 0 = 0;
+        *(volatile int *) 0 = 0;
     }
 }
 

@@ -1,0 +1,1 @@
+  -L/home/arun/rnnoise/wasm/lib  -lrnnoise -lm -lrt 

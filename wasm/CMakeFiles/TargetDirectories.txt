@@ -1,0 +1,9 @@
+/home/arun/rnnoise/wasm/CMakeFiles/rebuild_cache.dir
+/home/arun/rnnoise/wasm/CMakeFiles/edit_cache.dir
+/home/arun/rnnoise/wasm/src/CMakeFiles/rebuild_cache.dir
+/home/arun/rnnoise/wasm/src/CMakeFiles/edit_cache.dir
+/home/arun/rnnoise/wasm/src/CMakeFiles/rnnoise_static.dir
+/home/arun/rnnoise/wasm/examples/CMakeFiles/rebuild_cache.dir
+/home/arun/rnnoise/wasm/examples/CMakeFiles/edit_cache.dir
+/home/arun/rnnoise/wasm/examples/CMakeFiles/rnnoise_demo_simple.dir
+/home/arun/rnnoise/wasm/examples/CMakeFiles/rnnoise_demo.dir
