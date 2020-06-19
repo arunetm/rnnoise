@@ -29,6 +29,8 @@
 #define RNNOISE_H 1
 
 #include <stdio.h>
+#include "emscripten.h"
+// #define EMSCRIPTEN_KEEPALIVE
 
 
 #ifndef RNNOISE_EXPORT

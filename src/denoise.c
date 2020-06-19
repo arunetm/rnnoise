@@ -252,11 +252,12 @@ static void apply_window(float *x) {
     x[WINDOW_SIZE - 1 - i] *= common.half_window[i];
   }
 }
-
+EMSCRIPTEN_KEEPALIVE
 int rnnoise_get_size() {
   return sizeof(DenoiseState);
 }
 
+EMSCRIPTEN_KEEPALIVE
 int rnnoise_init(DenoiseState *st, RNNModel *model) {
   memset(st, 0, sizeof(*st));
   if (model)
@@ -269,6 +270,7 @@ int rnnoise_init(DenoiseState *st, RNNModel *model) {
   return 0;
 }
 
+EMSCRIPTEN_KEEPALIVE
 DenoiseState *rnnoise_create(RNNModel *model) {
   DenoiseState *st;
   st = malloc(rnnoise_get_size());
@@ -276,6 +278,7 @@ DenoiseState *rnnoise_create(RNNModel *model) {
   return st;
 }
 
+EMSCRIPTEN_KEEPALIVE
 void rnnoise_destroy(DenoiseState *st) {
   free(st->rnn.vad_gru_state);
   free(st->rnn.noise_gru_state);
@@ -451,6 +454,7 @@ void pitch_filter(kiss_fft_cpx *X, const kiss_fft_cpx *P, const float *Ex, const
   }
 }
 
+EMSCRIPTEN_KEEPALIVE
 float rnnoise_process_frame(DenoiseState *st, float *out, const float *in) {
   int i;
   kiss_fft_cpx X[FREQ_SIZE];
