@@ -1,38 +1,188 @@
-/* Copyright (c) 2018 Gregor Richards
- * Copyright (c) 2017 Mozilla */
-/*
-   Redistribution and use in source and binary forms, with or without
-   modification, are permitted provided that the following conditions
-   are met:
-
-   - Redistributions of source code must retain the above copyright
-   notice, this list of conditions and the following disclaimer.
-
-   - Redistributions in binary form must reproduce the above copyright
-   notice, this list of conditions and the following disclaimer in the
-   documentation and/or other materials provided with the distribution.
-
-   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-   ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-   A PARTICULAR PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE FOUNDATION OR
-   CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
-   EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
-   PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
-   PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
-   LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
-   NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
-   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-*/
-
-// emcc -g -O2 -s LINKABLE=1 -fsanitize=undefined  -s ASSERTIONS=1 -s SAFE_HEAP=1 -s WARN_UNALIGNED=1 -s TOTAL_MEMORY=512MB -s ALLOW_MEMORY_GROWTH=1 -s EXPORT_ALL=1 -s EXTRA_EXPORTED_RUNTIME_METHODS='["cwrap"]' -I ../include/ ../src/*.c ../examples/*.c -o rnn_denoise.js
 
 #include <stdio.h>
-#include <stdlib.h>
 #include "rnnoise.h"
+#include <stdlib.h>
+#include <stdint.h>
 #include "emscripten.h"
+// #define EMSCRIPTEN_KEEPALIVE
 
-#define FRAME_SIZE 480
+
+#define DR_MP3_IMPLEMENTATION
+
+#include "dr_mp3.h"
+
+#define DR_WAV_IMPLEMENTATION
+
+#include "dr_wav.h"
+
+#if   defined(__APPLE__)
+# include <mach/mach_time.h>
+#elif defined(_WIN32)
+# define WIN32_LEAN_AND_MEAN
+
+# include <windows.h>
+
+#else // __linux
+
+# include <time.h>
+
+# ifndef  CLOCK_MONOTONIC //_RAW
+#  define CLOCK_MONOTONIC CLOCK_REALTIME
+# endif
+#endif
+
+static
+uint64_t nanotimer() {
+    static int ever = 0;
+#if defined(__APPLE__)
+    static mach_timebase_info_data_t frequency;
+    if (!ever) {
+        if (mach_timebase_info(&frequency) != KERN_SUCCESS) {
+            return 0;
+        }
+        ever = 1;
+    }
+    return  (mach_absolute_time() * frequency.numer / frequency.denom);
+#elif defined(_WIN32)
+    static LARGE_INTEGER frequency;
+    if (!ever) {
+        QueryPerformanceFrequency(&frequency);
+        ever = 1;
+    }
+    LARGE_INTEGER t;
+    QueryPerformanceCounter(&t);
+    return (t.QuadPart * (uint64_t) 1e9) / frequency.QuadPart;
+#else // __linux
+    struct timespec t = {0};
+    if (!ever) {
+        if (clock_gettime(CLOCK_MONOTONIC, &t) != 0) {
+            return 0;
+        }
+        ever = 1;
+    }
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (t.tv_sec * (uint64_t) 1e9) + t.tv_nsec;
+#endif
+}
+
+static double now() {
+    static uint64_t epoch = 0;
+    if (!epoch) {
+        epoch = nanotimer();
+    }
+    return (nanotimer() - epoch) / 1e9;
+};
+
+static double calcElapsed(double start, double end) {
+    double took = -start;
+    return took + end;
+}
+
+void wavWrite_s16(char *filename, float *buffer, int sampleRate, uint32_t totalSampleCount, uint32_t channels) {
+    drwav_data_format format;
+    format.container = drwav_container_riff;
+    format.format = DR_WAVE_FORMAT_PCM;
+    format.channels = channels;
+    format.sampleRate = (drwav_uint32) sampleRate;
+    format.bitsPerSample = 16;
+    short *buffer_16=  (short*) buffer;
+    for (int32_t i = 0; i < totalSampleCount; ++i) {
+        buffer_16[i] = drwav_clamp(buffer[i], -32768, 32767);
+    }
+    drwav *pWav = drwav_open_file_write(filename, &format);
+    if (pWav) {
+        drwav_uint64 samplesWritten = drwav_write(pWav, totalSampleCount, buffer);
+        drwav_uninit(pWav);
+        if (samplesWritten != totalSampleCount) {
+            fprintf(stderr, "write file [%s] error.\n", filename);
+            exit(1);
+        }
+    }
+}
+ 
+void wavWrite_f32(char *filename, float *buffer, int sampleRate, uint32_t totalSampleCount, uint32_t channels) {
+    drwav_data_format format;
+    format.container = drwav_container_riff;
+    format.format = DR_WAVE_FORMAT_IEEE_FLOAT;
+    format.channels = channels;
+    format.sampleRate = (drwav_uint32) sampleRate;
+    format.bitsPerSample = 32;
+    for (int32_t i = 0; i < totalSampleCount; ++i) {
+        buffer[i] = drwav_clamp(buffer[i], -32768, 32767) * (1.0f / 32768.0f);
+    }
+    drwav *pWav = drwav_open_file_write(filename, &format);
+    if (pWav) {
+        drwav_uint64 samplesWritten = drwav_write(pWav, totalSampleCount, buffer);
+        drwav_uninit(pWav);
+        if (samplesWritten != totalSampleCount) {
+            fprintf(stderr, "write file [%s] error.\n", filename);
+            exit(1);
+        }
+    }
+}
+
+float *wavRead_f32(const char *filename, uint32_t *sampleRate, uint64_t *sampleCount, uint32_t *channels) {
+    drwav_uint64 totalSampleCount = 0;
+    float *input = drwav_open_file_and_read_pcm_frames_f32(filename, channels, sampleRate, &totalSampleCount);
+    if (input == NULL) {
+        drmp3_config pConfig;
+        input = drmp3_open_file_and_read_f32(filename, &pConfig, &totalSampleCount);
+        if (input != NULL) {
+            *channels = pConfig.outputChannels;
+            *sampleRate = pConfig.outputSampleRate;
+        }
+    }
+    if (input == NULL) {
+        fprintf(stderr, "read file [%s] error.\n", filename);
+        exit(1);
+    }
+    *sampleCount = totalSampleCount * (*channels);
+    for (int32_t i = 0; i < *sampleCount; ++i) {
+        input[i] = input[i] * 32768.0f;
+    }
+    return input;
+}
+
+
+void splitpath(const char *path, char *drv, char *dir, char *name, char *ext) {
+    const char *end;
+    const char *p;
+    const char *s;
+    if (path[0] && path[1] == ':') {
+        if (drv) {
+            *drv++ = *path++;
+            *drv++ = *path++;
+            *drv = '\0';
+        }
+    } else if (drv)
+        *drv = '\0';
+    for (end = path; *end && *end != ':';)
+        end++;
+    for (p = end; p > path && *--p != '\\' && *p != '/';)
+        if (*p == '.') {
+            end = p;
+            break;
+        }
+    if (ext)
+        for (s = end; (*ext = *s++);)
+            ext++;
+    for (p = end; p > path;)
+        if (*--p == '\\' || *p == '/') {
+            p++;
+            break;
+        }
+    if (name) {
+        for (s = p; s < end;)
+            *name++ = *s++;
+        *name = '\0';
+    }
+    if (dir) {
+        for (s = path; s < p;)
+            *dir++ = *s++;
+        *dir = '\0';
+    }
+}
+
 EMSCRIPTEN_KEEPALIVE
 uint64_t Resample_f32(const float *input, float *output, int inSampleRate, int outSampleRate, uint64_t inputSize,
                       uint32_t channels
@@ -40,7 +190,6 @@ uint64_t Resample_f32(const float *input, float *output, int inSampleRate, int o
     if (input == NULL)
         return 0;
     uint64_t outputSize = inputSize * outSampleRate / inSampleRate;
-
     if (output == NULL)
         return outputSize;
     double stepDist = ((double) inSampleRate / (double) outSampleRate);
@@ -62,11 +211,21 @@ uint64_t Resample_f32(const float *input, float *output, int inSampleRate, int o
     return outputSize;
 }
 
+void print(const float* buffer, const unsigned size, char* str) {
+  printf("\n-------------%c-------------\n\n", str);
+  for(int j=0; j<10; ++j) {
+    printf("\n");
+    for(int i = 0; i<size/10; ++i) printf("%f, ", *(buffer++));
+  }
+  printf("\n-------------------------\n\n");
+}
+
 EMSCRIPTEN_KEEPALIVE
-void denoise_proc(float *input, unsigned sampleCount, unsigned sampleRate, unsigned channels) {
-    unsigned targetFrameSize = 480;
-    unsigned targetSampleRate = 48000;
-    unsigned perFrameSize = sampleRate / 100;
+void denoise_proc(float *input, uint64_t sampleCount, uint32_t sampleRate, uint32_t channels) {
+    int flag = 0;
+    uint32_t targetFrameSize = 480;
+    uint32_t targetSampleRate = 48000;
+    uint32_t perFrameSize = sampleRate / 100;
     float *frameBuffer = (float *) malloc(sizeof(*frameBuffer) * (channels + 1) * targetFrameSize);
     float *processBuffer = frameBuffer + targetFrameSize * channels;
     DenoiseState **sts = malloc(channels * sizeof(DenoiseState *));
@@ -92,11 +251,32 @@ void denoise_proc(float *input, unsigned sampleCount, unsigned sampleRate, unsig
         }
     }
     size_t frameStep = channels * perFrameSize;
-    unsigned frames = sampleCount / frameStep;
-    unsigned lastFrameSize = (sampleCount % frameStep) / channels;
+    uint64_t frames = sampleCount / frameStep;
+    uint64_t lastFrameSize = (sampleCount % frameStep) / channels;
     for (int i = 0; i < frames; ++i) {
+        if(flag) print(input, 480, '1');
+
         Resample_f32(input, frameBuffer, sampleRate, targetSampleRate,
                      perFrameSize, channels);
+        for (int c = 0; c < channels; c++) {
+            for (int k = 0; k < targetFrameSize; k++)
+                processBuffer[k] = frameBuffer[k * channels + c];
+            if(flag) print(processBuffer, 480, '2');
+            rnnoise_process_frame(sts[c], processBuffer, processBuffer);
+            if(flag) print(processBuffer, 480, '3');
+
+            for (int k = 0; k < targetFrameSize; k++)
+                frameBuffer[k * channels + c] = processBuffer[k];
+        }
+        Resample_f32(frameBuffer, input, targetSampleRate, sampleRate, targetFrameSize, channels);
+        if(flag){ print(input, 480, '4');  }
+        input += frameStep;
+    }
+    if (lastFrameSize != 0) {
+        memset(frameBuffer, 0, targetFrameSize * channels * sizeof(float));
+        uint64_t lastReasmpleSize = Resample_f32(input, frameBuffer, sampleRate,
+                                                 targetSampleRate,
+                                                 lastFrameSize, channels);
         for (int c = 0; c < channels; c++) {
             for (int k = 0; k < targetFrameSize; k++)
                 processBuffer[k] = frameBuffer[k * channels + c];
@@ -104,24 +284,9 @@ void denoise_proc(float *input, unsigned sampleCount, unsigned sampleRate, unsig
             for (int k = 0; k < targetFrameSize; k++)
                 frameBuffer[k * channels + c] = processBuffer[k];
         }
-        Resample_f32(frameBuffer, input, targetSampleRate, sampleRate, targetFrameSize, channels);
-        input += frameStep;
+        Resample_f32(frameBuffer, input, targetSampleRate, sampleRate, lastReasmpleSize,
+                     channels);
     }
-    // if (lastFrameSize != 0) {
-    //     memset(frameBuffer, 0, targetFrameSize * channels * sizeof(float));
-    //     unsigned lastReasmpleSize = Resample_f32(input, frameBuffer, sampleRate,
-    //                                              targetSampleRate,
-    //                                              lastFrameSize, channels);
-    //     for (int c = 0; c < channels; c++) {
-    //         for (int k = 0; k < targetFrameSize; k++)
-    //             processBuffer[k] = frameBuffer[k * channels + c];
-    //         rnnoise_process_frame(sts[c], processBuffer, processBuffer);
-    //         for (int k = 0; k < targetFrameSize; k++)
-    //             frameBuffer[k * channels + c] = processBuffer[k];
-    //     }
-    //     Resample_f32(frameBuffer, input, targetSampleRate, sampleRate, lastReasmpleSize,
-    //                  channels);
-    // }
     for (int i = 0; i < channels; i++) {
         if (sts[i]) {
             rnnoise_destroy(sts[i]);
@@ -131,50 +296,81 @@ void denoise_proc(float *input, unsigned sampleCount, unsigned sampleRate, unsig
     free(frameBuffer);
 }
 
+#define FRAME_SIZE 480
 EMSCRIPTEN_KEEPALIVE
-int denoise_proc_mono(float *input, unsigned sampleCount) {
+int denoise_proc_mono(float *input, unsigned sampleCount, unsigned sampleRate, unsigned channels) {
   DenoiseState *st;
   st = rnnoise_create(NULL);
 
   int counter = 0;
-  int numFrames = sampleCount / FRAME_SIZE;
+  int numFrames = sampleCount / FRAME_SIZE ;
   int result = (int) input;
   
-  while(counter < numFrames )
+  float *frameBuffer = (float *) malloc(sizeof(*frameBuffer) * (1 + 1) * FRAME_SIZE);
+  uint32_t targetSampleRate = 48000;
+  uint32_t perFrameSize = sampleRate / 100;
+
+
+  while(counter < numFrames  )
   {
-    rnnoise_process_frame(st, input, input);
+    Resample_f32(input, frameBuffer, sampleRate, targetSampleRate, sampleCount, channels);
+    rnnoise_process_frame(st, frameBuffer, frameBuffer);
+    Resample_f32(frameBuffer, input, targetSampleRate, sampleRate, FRAME_SIZE, channels);
+
     counter ++;
     input+=FRAME_SIZE;
   }
-  // rnnoise_destroy(st);
+  rnnoise_destroy(st);
   return result;
 }
 
+
+void rnnDeNoise(char *in_file, char *out_file) {
+    uint32_t sampleRate = 0;
+    uint64_t sampleCount = 0;
+    uint32_t channels = 0;
+    float *buffer = wavRead_f32(in_file, &sampleRate, &sampleCount, &channels);
+    if (buffer != NULL) {
+        double startTime = now();
+        denoise_proc(buffer, sampleCount, sampleRate, channels);
+        // denoise_proc_mono(buffer, sampleCount, sampleRate, channels);
+        double time_interval = calcElapsed(startTime, now());
+        printf("time interval: %f ms\n ", (time_interval * 1000));
+        wavWrite_s16(out_file, buffer, sampleRate, (uint32_t) sampleCount, channels);
+        free(buffer);
+    }
+}
+
+
 int main(int argc, char **argv) {
-  // int i;
-  // int first = 1;
-  // float x[FRAME_SIZE];
-  // FILE *f1, *fout;
-  // DenoiseState *st;
-  // st = rnnoise_create(NULL);
-  // if (argc!=3) {
-  //   fprintf(stderr, "usage: %s <noisy speech> <output denoised>\n", argv[0]);
-  //   return 1;
-  // }
-  // f1 = fopen(argv[1], "r");
-  // fout = fopen(argv[2], "w");
-  // while (1) {
-  //   short tmp[FRAME_SIZE];
-  //   fread(tmp, sizeof(short), FRAME_SIZE, f1);
-  //   if (feof(f1)) break;
-  //   for (i=0;i<FRAME_SIZE;i++) x[i] = tmp[i];
-  //   rnnoise_process_frame(st, x, x);
-  //   for (i=0;i<FRAME_SIZE;i++) tmp[i] = x[i];
-  //   if (!first) fwrite(tmp, sizeof(short), FRAME_SIZE, fout);
-  //   first = 0;
-  // }
-  // rnnoise_destroy(st);
-  // fclose(f1);
-  // fclose(fout);
-  return 0;
+    // printf("Audio Noise Reduction\n");
+    // printf("blog:http://cpuimage.cnblogs.com/\n");
+    // printf("e-mail:gaozhihan@vip.qq.com\n");
+
+    // if (argc < 2) {
+    //     printf("usage:\n");
+    //     printf("./rnnoise input.wav\n");
+    //     printf("./rnnoise input.mp3\n");
+    //     printf("or\n");
+    //     printf("./rnnoise input.wav output.wav\n");
+    //     printf("./rnnoise input.mp3 output.wav\n");
+    //     return -1;
+    // }
+    // char *in_file = argv[1];
+    // if (argc > 2) {
+    //     char *out_file = argv[2];
+    //     rnnDeNoise(in_file, out_file);
+    // } else {
+    //     char drive[3];
+    //     char dir[256];
+    //     char fname[256];
+    //     char ext[256];
+    //     char out_file[1024];
+    //     splitpath(in_file, drive, dir, fname, ext);
+    //     sprintf(out_file, "%s%s%s_out.wav", drive, dir, fname);
+    //     rnnDeNoise(in_file, out_file);
+    // }
+    // printf("press any key to exit.\n");
+    // getchar();
+    return 0;
 }
